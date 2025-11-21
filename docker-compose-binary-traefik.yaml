@@ -29,3 +29,8 @@ services:
       - metrics.instance=monad-otel-collector
       - metrics.network=monad
     <<: *logging
+
+networks:
+  default:
+    name: ${DOCKER_EXT_NETWORK:-traefik_default}
+    external: true
