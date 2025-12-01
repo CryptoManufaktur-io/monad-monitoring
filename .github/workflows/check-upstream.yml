@@ -38,14 +38,6 @@ jobs:
 
           if [ "$NEW_COMMITS" -gt 0 ]; then
             echo "has_updates=true" >> $GITHUB_OUTPUT
-
-            # Get commit log for PR description
-            COMMIT_LOG=$(git log HEAD..upstream/main --pretty=format:"- %h %s (%an)" 2>/dev/null)
-            {
-              echo "commit_log<<EOFLOG"
-              echo "$COMMIT_LOG"
-              echo "EOFLOG"
-            } >> $GITHUB_OUTPUT
           else
             echo "has_updates=false" >> $GITHUB_OUTPUT
           fi
@@ -54,62 +46,59 @@ jobs:
         if: steps.check.outputs.has_updates == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NEW_COMMITS: ${{ steps.check.outputs.new_commits }}
-          COMMIT_LOG: ${{ steps.check.outputs.commit_log }}
         run: |
+          NEW_COMMITS="${{ steps.check.outputs.new_commits }}"
+
           # Check if there's already an open PR
           EXISTING_PR=$(gh pr list --label "upstream-sync" --state open --json number --jq 'length')
 
           if [ "$EXISTING_PR" -eq 0 ]; then
-            # Create a new branch for the sync
             BRANCH_NAME="upstream-sync-$(date +%Y%m%d)"
             git checkout -b "$BRANCH_NAME"
 
-            # Merge upstream changes
             if git merge upstream/main --no-edit; then
               git push origin "$BRANCH_NAME"
 
-              # Create PR body
-              BODY="## Upstream Sync
+              COMMIT_LOG=$(git log HEAD~${NEW_COMMITS}..HEAD --pretty=format:"- %h %s (%an)")
 
-This PR syncs changes from [staking4all/monad-monitoring](https://github.com/staking4all/monad-monitoring).
+              cat > /tmp/pr-body.md << EOFBODY
+          ## Upstream Sync
 
-### ${NEW_COMMITS} new commit(s) from upstream:
+          This PR syncs changes from [staking4all/monad-monitoring](https://github.com/staking4all/monad-monitoring).
 
-${COMMIT_LOG}
+          ### ${NEW_COMMITS} new commit(s) from upstream
 
-### Review Checklist
-- [ ] Review the changes for compatibility
-- [ ] Check if any custom configurations need updating
-- [ ] Test after merging if needed
+          ${COMMIT_LOG}
 
----
-*This PR was automatically created by the upstream sync workflow.*"
+          ### Review Checklist
+          - [ ] Review the changes for compatibility
+          - [ ] Check if any custom configurations need updating
+          - [ ] Test after merging if needed
+
+          ---
+          *This PR was automatically created by the upstream sync workflow.*
+          EOFBODY
 
               gh pr create \
-                --title "🔄 Sync upstream: ${NEW_COMMITS} new commit(s)" \
-                --body "$BODY" \
+                --title "Sync upstream: ${NEW_COMMITS} new commit(s)" \
+                --body-file /tmp/pr-body.md \
                 --label "upstream-sync" \
                 --base main \
                 --head "$BRANCH_NAME"
 
-              echo "✅ Created PR for ${NEW_COMMITS} new upstream commits"
+              echo "Created PR for ${NEW_COMMITS} new upstream commits"
             else
-              echo "⚠️ Merge conflicts detected. Manual intervention required."
-              echo "Run locally:"
-              echo "  git fetch upstream"
-              echo "  git merge upstream/main"
-              echo "  # Resolve conflicts, then push"
+              echo "Merge conflicts detected. Manual intervention required."
               exit 1
             fi
           else
-            echo "ℹ️ PR already exists, skipping creation"
+            echo "PR already exists, skipping creation"
           fi
 
       - name: Summary
         run: |
           if [ "${{ steps.check.outputs.has_updates }}" == "true" ]; then
-            echo "✅ Found ${{ steps.check.outputs.new_commits }} new upstream commits."
+            echo "Found ${{ steps.check.outputs.new_commits }} new upstream commits."
           else
-            echo "✅ No new upstream commits. Your fork is up to date!"
+            echo "No new upstream commits. Your fork is up to date!"
           fi
