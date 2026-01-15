@@ -11,6 +11,8 @@ services:
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.139.0
     command: ["--config=/etc/otel-collector-config.yaml", ""]
+    environment:
+      - VALIDATOR_SECP=${VALIDATOR_SECP}
     volumes:
       - ./collector/otel-collector-config.yaml:/etc/otel-collector-config.yaml
     ports:

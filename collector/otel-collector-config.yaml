@@ -34,7 +34,7 @@ processors:
   resource:
     attributes:
     - key: secp_key
-      value: "SECP_KEY"
+      value: "${VALIDATOR_SECP}"
       action: upsert
 
 service:
