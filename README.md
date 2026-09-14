@@ -81,7 +81,7 @@ The default dashboard is `Monad monitoring`, an additional dashboard has been ad
 
 ## Activate V2 dashboard
 
-To use V2 you must make an entry in crontab by adding one of the below line, this script collects extra info to be displayed on the dashbaord
+To use V2 you must schedule the collector script; it gathers the extra info the dashboard displays.
 
 For Monad binary installation
 ````
@@ -93,10 +93,53 @@ For Monad docker installation
 * * * * * /home/monad/monad-monitoring/textfile-collector/script-data-collector-docker.sh >> /home/monad/error.log
 ````
 
-If using a binary installation you need to ensure the user monad for crontab can read the syslog files. 
+The binary collector reads consensus state from the systemd journal, so the user running it
+needs journal access. It reads the TrieDB via `monad-mpt`, which needs root or a sudo rule:
+````
+sudo usermod -a -G systemd-journal monad
+````
+
+The docker collector still parses syslog, so for that variant grant `adm` instead:
 ````
 sudo usermod -a -G adm monad
 ````
+
+### Paths and overrides
+
+The binary collector takes its paths from the environment, so it works regardless of where the
+repository is checked out. Defaults preserve the original behaviour:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `TARGET_DRIVE` | from `MONAD_ENV_FILE`, else `triedb` | Device holding the TrieDB |
+| `MONAD_HOME` | `/home/monad/monad-bft` | Node data directory |
+| `MONAD_ENV_FILE` | `/home/monad/.env` | Where `TARGET_DRIVE` is read from |
+| `JOURNAL_UNIT` | `monad-bft` | Unit to read consensus state from |
+| `JOURNAL_LINES` | `2000` | Journal lines to scan |
+| `OUTPUT_FILE` | `<script dir>/data/monad-metrics-data.prom` | Metrics file node_exporter reads |
+
+### Detecting a stalled collector
+
+The collector publishes `mc_collector_last_success_timestamp_seconds`. If it stops running, every
+other `mc_*` metric silently holds its last value, so dashboards and alerts keep reading as healthy
+while the data is arbitrarily old. Alert on the heartbeat rather than trusting the gauges:
+
+````
+time() - mc_collector_last_success_timestamp_seconds > 600
+````
+
+### Block proposal metrics
+
+`mc_block_proposal` is no longer emitted. It was scraped from log lines (`proposed_block`,
+`finalized_block`, `timeout`) that current Monad releases no longer write, and it encoded `round`,
+`seq_num` and `time_stamp` as labels, which grows unbounded series. The node's own metrics cover
+the same ground:
+
+| Replaces | Use |
+|---|---|
+| `mc_block_proposal{type="proposed"}` | `rate(monad_bft_txpool_create_proposal[5m])` |
+| `mc_block_proposal{type="finalized"}` | `rate(monad_state_consensus_events_commit_block[5m])` |
+| `mc_block_proposal{type="timeout"}` | `rate(monad_state_consensus_events_local_timeout[5m])` |
 
 ## Activate V3 dashboard
 
