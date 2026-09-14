@@ -1,0 +1,24 @@
+[Unit]
+Description=Monad node_exporter textfile metrics collector
+Documentation=https://github.com/CryptoManufaktur-io/monad-monitoring
+After=monad-bft.service
+
+[Service]
+Type=oneshot
+
+# Runs as root because the collector reads the raw TrieDB device through
+# monad-mpt, reads the systemd journal, and walks the node data directory.
+User=root
+
+# Optional overrides. The leading dash makes the file optional, so the
+# defaults baked into the script apply when it is absent. Recognised keys:
+# TARGET_DRIVE, MONAD_HOME, MONAD_ENV_FILE, JOURNAL_UNIT, JOURNAL_LINES,
+# OUTPUT_FILE, MONAD_MPT.
+EnvironmentFile=-/etc/default/monad-textfile-collector
+
+# Install the script here rather than running it from the checkout: this unit
+# runs as root, and a checkout owned by an unprivileged user would let that
+# user choose what root executes.
+ExecStart=/usr/local/bin/monad-textfile-collector
+
+TimeoutStartSec=120

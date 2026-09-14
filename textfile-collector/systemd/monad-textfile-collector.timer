@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the Monad textfile metrics collector periodically
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=monad-textfile-collector.service
+
+# Timer settings are parsed by systemd itself and cannot be read from an
+# EnvironmentFile. To change the interval, drop in an override:
+#   systemctl edit monad-textfile-collector.timer
+[Install]
+WantedBy=timers.target
