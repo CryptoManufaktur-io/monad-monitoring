@@ -104,6 +104,54 @@ The docker collector still parses syslog, so for that variant grant `adm` instea
 sudo usermod -a -G adm monad
 ````
 
+### Running it with systemd instead of cron
+
+For the binary install, `textfile-collector/systemd/` provides a timer and a oneshot
+service. Preferred over the cron entry above: failures land in the journal with a
+status you can query, rather than in a log file nobody reads.
+
+Install the script to a root-owned path, rather than pointing the unit at this
+checkout. The service runs as root, and a checkout owned by an unprivileged user
+would let that user choose what root executes.
+
+````
+sudo install -m 0755 -o root -g root \
+    textfile-collector/script-data-collector-binary.sh \
+    /usr/local/bin/monad-textfile-collector
+
+sudo install -m 0644 -o root -g root \
+    textfile-collector/systemd/monad-textfile-collector.service \
+    textfile-collector/systemd/monad-textfile-collector.timer \
+    /etc/systemd/system/
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now monad-textfile-collector.timer
+````
+
+Re-run the first command after pulling this repository, so the installed copy
+tracks the checkout.
+
+Check it:
+````
+systemctl list-timers monad-textfile-collector.timer
+systemctl status monad-textfile-collector.service
+````
+
+Any of the variables in the table below can be set in
+`/etc/default/monad-textfile-collector`, which the service reads if present:
+````
+TARGET_DRIVE=triedb
+MONAD_HOME=/home/monad/monad-bft
+OUTPUT_FILE=/home/myuser/monad-monitoring/textfile-collector/data/monad-metrics-data.prom
+````
+
+The interval lives in the timer rather than that file, because systemd parses
+`[Timer]` itself and does not expand environment variables there. To change it:
+````
+sudo systemctl edit monad-textfile-collector.timer
+````
+
+
 ### Paths and overrides
 
 The binary collector takes its paths from the environment, so it works regardless of where the
