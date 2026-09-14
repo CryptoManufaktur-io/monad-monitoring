@@ -1,1 +1,6 @@
 .env
+
+# Generated at run time by textfile-collector/script-data-collector-*.sh.
+# Committing it ships stale readings to every clone and dirties the working
+# tree on any host that runs the collector.
+textfile-collector/data/*.prom
