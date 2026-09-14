@@ -1,157 +1,132 @@
-#!/bin/bash
+#!/usr/bin/env bash
+#
+# Emits Monad node metrics for the node_exporter textfile collector.
+#
+# Every value is derived at run time. If this file's metrics stop changing,
+# this script has stopped running: check the cron entry or systemd timer.
+#
+# Configuration (all optional, defaults preserve previous behaviour):
+#   TARGET_DRIVE   device holding the TrieDB, e.g. "triedb" or "nvme1n1p1".
+#                  Resolved from $MONAD_ENV_FILE when unset.
+#   MONAD_HOME     monad-bft data directory. Default /home/monad/monad-bft
+#   MONAD_ENV_FILE node .env file to read TARGET_DRIVE from. Default /home/monad/.env
+#   JOURNAL_UNIT   systemd unit to read consensus state from. Default monad-bft
+#   JOURNAL_LINES  how many journal lines to scan. Default 2000
+#   OUTPUT_FILE    .prom file to write. Default <script dir>/data/monad-metrics-data.prom
 
-# Add Docker environment variables manually
-source /home/monad/.env 
-source /home/monad/.bashrc 
-source /home/monad/.profile
+set -uo pipefail
 
-# Get validator secp
-VALIDATOR_SECP=$(grep 'VALIDATOR_SECP' /home/monad/monad-monitoring/.env | cut -d '=' -f2) || { echo "VALIDATOR_SECP not found in .env"; exit 1; }
-
-TARGET_DRIVE=$(grep 'TARGET_DRIVE' /home/monad/.env | cut -d '=' -f2) || { echo "TARGET_DRIVE not found in .env"; exit 1; }
-
-# Extract the used and total capacity from local monad_mpt binary
-used_with_unit=$(/usr/local/bin/monad-mpt --storage /dev/$TARGET_DRIVE | grep -A 1 'Capacity' | tail -n 1 | awk '{print $3, $4}' | tr -d '\r') || { echo "Failed to get used capacity"; exit 1; }
-capacity_with_unit=$(/usr/local/bin/monad-mpt --storage /dev/$TARGET_DRIVE | grep -A 1 'Capacity' | tail -n 1 | awk '{print $1, $2}' | tr -d '\r') || { echo "Failed to get total capacity"; exit 1; }
-
-# Convert total capacity to bytes
-if [[ "${capacity_with_unit,,}" == *"tb"* ]]; then
-    capacity=$(echo "$capacity_with_unit" | sed 's/[Tt][Bb]//')
-    capacity_bytes=$(echo "$capacity * 1024 * 1024 * 1024 * 1024" | bc | awk '{printf "%.0f", $0}')
-elif [[ "${capacity_with_unit,,}" == *"gb"* ]]; then
-    capacity=$(echo "$capacity_with_unit" | sed 's/[Gg][Bb]//')
-    capacity_bytes=$(echo "$capacity * 1024 * 1024 * 1024" | bc | awk '{printf "%.0f", $0}')
-elif [[ "${capacity_with_unit,,}" == *"mb"* ]]; then
-    capacity=$(echo "$capacity_with_unit" | sed 's/[Mm][Bb]//')
-    capacity_bytes=$(echo "$capacity * 1024 * 1024" | bc | awk '{printf "%.0f", $0}')
-elif [[ "${capacity_with_unit,,}" == *"kb"* ]]; then
-    capacity=$(echo "$capacity_with_unit" | sed 's/[Kk][Bb]//')
-    capacity_bytes=$(echo "$capacity * 1024" | bc | awk '{printf "%.0f", $0}')
-else
-    echo "Unexpected capacity unit. Exiting."
-    exit 1
-fi
-
-# Convert used capacity to bytes
-if [[ "${used_with_unit,,}" == *"tb"* ]]; then
-    used=$(echo "$used_with_unit" | sed 's/[Tt][Bb]//')
-    used_bytes=$(echo "$used * 1024 * 1024 * 1024 * 1024" | bc | awk '{printf "%.0f", $0}')
-elif [[ "${used_with_unit,,}" == *"gb"* ]]; then
-    used=$(echo "$used_with_unit" | sed 's/[Gg][Bb]//')
-    used_bytes=$(echo "$used * 1024 * 1024 * 1024" | bc | awk '{printf "%.0f", $0}')
-elif [[ "${used_with_unit,,}" == *"mb"* ]]; then
-    used=$(echo "$used_with_unit" | sed 's/[Mm][Bb]//')
-    used_bytes=$(echo "$used * 1024 * 1024" | bc | awk '{printf "%.0f", $0}')
-elif [[ "${used_with_unit,,}" == *"kb"* ]]; then
-    used=$(echo "$used_with_unit" | sed 's/[Kk][Bb]//')
-    used_bytes=$(echo "$used * 1024" | bc | awk '{printf "%.0f", $0}')
-else
-    echo "Unexpected used unit. Exiting."
-    exit 1
-fi
-
-# Calculate available bytes
-avail_bytes=$(echo "$capacity_bytes - $used_bytes" | bc | awk '{printf "%.0f", $0}')
-
-# Get current epoch from syslog
-current_epoch=$(tail -5000 /var/log/syslog | grep -o 'epoch: [0-9]*' | tail -n 1 | awk '{print $2}') || { echo "Failed to get current epoch"; current_epoch=0; }
-
-# Get current round from syslog
-current_round=$(tail -5000 /var/log/syslog | grep -o 'round: [0-9]*' | tail -n 1 | awk '{print $2}') || { echo "Failed to get current round"; current_round=0; }
-
-# Get forkpoint file count
-forkpoint_dir_count=$(find /home/monad/monad-bft/config/forkpoint -type f | wc -l) || { echo "Failed to get forkpoint file count"; forkpoint_dir_count=0; }
-
-# Get ledger file count
-ledger_dir_count=$(find /home/monad/monad-bft/ledger -type f | wc -l) || { echo "Failed to get ledger file count"; ledger_dir_count=0; }
-
-# Get wal file count
-wal_dir_count=$(find /home/monad/monad-bft/ -type f -name "wal_*" | wc -l) || { echo "Failed to get wal file count"; wal_dir_count=0; }
-
-# Get the directory where the script is stored
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Set the output file path relative to the script's location
-output_file="$script_dir/data/monad-metrics-data.prom"
+MONAD_HOME="${MONAD_HOME:-/home/monad/monad-bft}"
+MONAD_ENV_FILE="${MONAD_ENV_FILE:-/home/monad/.env}"
+JOURNAL_UNIT="${JOURNAL_UNIT:-monad-bft}"
+JOURNAL_LINES="${JOURNAL_LINES:-2000}"
+OUTPUT_FILE="${OUTPUT_FILE:-$script_dir/data/monad-metrics-data.prom}"
+MONAD_MPT="${MONAD_MPT:-/usr/local/bin/monad-mpt}"
 
-# Extract block proposals, finalized and timeout blocks from syslog
-mapfile -t block_logs < <(tail -500000 /var/log/syslog | grep -i "\"author\":\"${VALIDATOR_SECP}\"" | grep -E '"message":"(proposed_block|finalized_block|timeout)"')
+# Resolve the TrieDB device. Prefer an explicit TARGET_DRIVE, then the node
+# .env, then the /dev/triedb udev symlink that the standard install creates.
+if [ -z "${TARGET_DRIVE:-}" ] && [ -r "$MONAD_ENV_FILE" ]; then
+    TARGET_DRIVE="$(grep -m1 '^TARGET_DRIVE=' "$MONAD_ENV_FILE" | cut -d= -f2- | tr -d '"'"'"' \r')"
+fi
+if [ -z "${TARGET_DRIVE:-}" ] && [ -e /dev/triedb ]; then
+    TARGET_DRIVE="triedb"
+fi
+if [ -z "${TARGET_DRIVE:-}" ]; then
+    echo "TARGET_DRIVE is not set, not in $MONAD_ENV_FILE, and /dev/triedb does not exist" >&2
+    exit 1
+fi
+TRIEDB_DEV="/dev/${TARGET_DRIVE#/dev/}"
 
-# Process each block log
-declare -a block_proposals
-for log in "${block_logs[@]}"; do
-    # Extract timestamp and convert to readable format
-    timestamp=$(echo "$log" | sed -n 's/.*"timestamp":"\(202[0-9]-[0-9]\{2\}-[0-9]\{2\}T[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\.[0-9]\+Z\)".*/\1/p')
-    readable_timestamp=$(date -d "$timestamp" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "1970-01-01 00:00:00")
+output_dir="$(dirname "$OUTPUT_FILE")"
+mkdir -p "$output_dir" || { echo "Cannot create $output_dir" >&2; exit 1; }
 
-    # Extract round
-    round=$(echo "$log" | grep -o '"round":"[0-9]*"' | cut -d':' -f2 | tr -d '"')
+# Build the file off to one side and move it into place at the end. node_exporter
+# reads this directory continuously and would otherwise be able to observe a
+# half-written file.
+tmp_file="$(mktemp "$output_dir/.monad-metrics-data.XXXXXX")" || exit 1
+trap 'rm -f "$tmp_file"' EXIT
 
-    # Extract seq_num and num_tx
-    seq_num=$(echo "$log" | grep -o '"seq_num":"[0-9]*"' | cut -d':' -f2 | tr -d '"')
-    num_tx=$(echo "$log" | grep -o '"num_tx":"[0-9]*"' | cut -d':' -f2 | tr -d '"')
+# node_exporter discards the *entire* textfile on a single malformed line, so a
+# metric whose source could not be parsed is omitted rather than written blank.
+# One broken parser therefore costs one metric, not all of them.
+emit_gauge() {
+    local name=$1 help=$2 value=$3
+    case "$value" in
+        '' | *[!0-9]*) return 0 ;;
+    esac
+    printf '# HELP %s %s\n# TYPE %s gauge\n%s %s\n' "$name" "$help" "$name" "$name" "$value" >> "$tmp_file"
+}
 
-    # Determine block type and value
-    if echo "$log" | grep -q '"message":"proposed_block"'; then
-        block_type="proposed"
-        value=1
-    elif echo "$log" | grep -q '"message":"finalized_block"'; then
-        block_type="finalized"
-        value=1
-    elif echo "$log" | grep -q '"message":"timeout"'; then
-        block_type="timeout"
-        value=0
+# "1.75 Tb" -> bytes. monad-mpt labels binary units as Tb/Gb/Mb/Kb.
+to_bytes() {
+    local value=$1 unit=$2 multiplier
+    case "${unit,,}" in
+        tb) multiplier=$((1024 ** 4)) ;;
+        gb) multiplier=$((1024 ** 3)) ;;
+        mb) multiplier=$((1024 ** 2)) ;;
+        kb) multiplier=1024 ;;
+        b)  multiplier=1 ;;
+        *)  return 1 ;;
+    esac
+    case "$value" in
+        '' | *[!0-9.]*) return 1 ;;
+    esac
+    awk -v v="$value" -v m="$multiplier" 'BEGIN { printf "%.0f", v * m }'
+}
+
+# TrieDB capacity. The header row reads "Capacity Used % Path" and the row under
+# it carries all three, so one grep serves every field.
+mpt_row="$("$MONAD_MPT" --storage "$TRIEDB_DEV" 2>/dev/null | grep -A1 'Capacity' | tail -n1 | tr -d '\r')"
+if [ -n "$mpt_row" ]; then
+    capacity_bytes="$(to_bytes "$(awk '{print $1}' <<<"$mpt_row")" "$(awk '{print $2}' <<<"$mpt_row")")" || capacity_bytes=""
+    used_bytes="$(to_bytes "$(awk '{print $3}' <<<"$mpt_row")" "$(awk '{print $4}' <<<"$mpt_row")")" || used_bytes=""
+
+    emit_gauge mc_triedb_total_bytes "Total capacity of $TRIEDB_DEV" "$capacity_bytes"
+    emit_gauge mc_triedb_used_bytes "Used capacity of $TRIEDB_DEV" "$used_bytes"
+    if [ -n "$capacity_bytes" ] && [ -n "$used_bytes" ]; then
+        emit_gauge mc_triedb_avail_bytes "Available capacity of $TRIEDB_DEV" "$((capacity_bytes - used_bytes))"
     fi
 
-    # Only add if we have valid data
-    if [[ -n "$round" && "$round" != "0" && -n "$block_type" ]]; then
-        # Use default values if seq_num or num_tx are not found
-        seq_num=${seq_num:-"0"}
-        num_tx=${num_tx:-"0"}
-        block_proposals+=("mc_block_proposal{validator=\"${VALIDATOR_SECP}\", round=\"${round}\", type=\"${block_type}\", seq_num=\"${seq_num}\", num_tx=\"${num_tx}\", time_stamp=\"${readable_timestamp}\"} $value")
-    fi
-done	
+    # monad-mpt rounds the byte columns to three significant figures, so a
+    # percentage derived from them drifts by up to ~1 point. It prints its own
+    # percentage at full precision, so publish that directly for alerting.
+    used_percent="$(awk '{print $5}' <<<"$mpt_row" | tr -d '%')"
+    case "$used_percent" in
+        '' | *[!0-9.]*) ;;
+        *) printf '# HELP %s %s\n# TYPE %s gauge\n%s %s\n' \
+               mc_triedb_used_percent "Used percentage of $TRIEDB_DEV as reported by monad-mpt" \
+               mc_triedb_used_percent mc_triedb_used_percent "$used_percent" >> "$tmp_file" ;;
+    esac
+else
+    echo "Failed to read TrieDB capacity from $MONAD_MPT --storage $TRIEDB_DEV" >&2
+fi
 
-# Write all metrics to the output file
-{
-    printf "# HELP mc_triedb_total_bytes Total capacity of /dev/$TARGET_DRIVE\n"
-    printf "# TYPE mc_triedb_total_bytes gauge\n"
-    printf "mc_triedb_total_bytes %s\n" "$capacity_bytes"
+journal="$(journalctl -u "$JOURNAL_UNIT" -n "$JOURNAL_LINES" --no-pager 2>/dev/null)"
 
-    printf "# HELP mc_triedb_used_bytes Used capacity of /dev/$TARGET_DRIVE\n"
-    printf "# TYPE mc_triedb_used_bytes gauge\n"
-    printf "mc_triedb_used_bytes %s\n" "$used_bytes"
+# Consensus epoch, logged as "epoch: 2094". The quantifier must be + and not *,
+# or a zero-digit match wins the tail and the metric is emitted empty.
+emit_gauge mc_current_epoch "Monad consensus epoch" \
+    "$(grep -oE 'epoch: [0-9]+' <<<"$journal" | tail -n1 | grep -oE '[0-9]+')"
 
-    printf "# HELP mc_triedb_avail_bytes Available capacity of /dev/$TARGET_DRIVE\n"
-    printf "# TYPE mc_triedb_avail_bytes gauge\n"
-    printf "mc_triedb_avail_bytes %s\n" "$avail_bytes"
+# Consensus round, logged as "round":"104796300".
+emit_gauge mc_current_round "Monad consensus round" \
+    "$(grep -oE '"round":"[0-9]+"' <<<"$journal" | tail -n1 | grep -oE '[0-9]+')"
 
-    printf "# HELP mc_current_epoch provides Monad epoch from logs\n"
-    printf "# TYPE mc_current_epoch gauge\n"
-    printf "mc_current_epoch %s\n" "$current_epoch"
+emit_gauge mc_forkpoint_dir_count "File count of the Monad forkpoint directory" \
+    "$(find "$MONAD_HOME/config/forkpoint" -type f 2>/dev/null | wc -l | tr -d ' ')"
+emit_gauge mc_ledger_dir_count "File count of the Monad ledger directory" \
+    "$(find "$MONAD_HOME/ledger" -type f 2>/dev/null | wc -l | tr -d ' ')"
+emit_gauge mc_wal_dir_count "File count of Monad wal files" \
+    "$(find "$MONAD_HOME" -type f -name 'wal_*' 2>/dev/null | wc -l | tr -d ' ')"
 
-    printf "# HELP mc_current_round provides Monad round from logs\n"
-    printf "# TYPE mc_current_round gauge\n"
-    printf "mc_current_round %s\n" "$current_round"
+# Freshness heartbeat. Alert on time() - this metric to catch the collector
+# dying silently, which is otherwise invisible: the gauges above simply hold
+# their last value and every dashboard and alert keeps reading as healthy.
+emit_gauge mc_collector_last_success_timestamp_seconds \
+    "Unix time of the last successful collector run" "$(date +%s)"
 
-    printf "# HELP mc_forkpoint_dir_count provides file count of Monad forkpoint directory\n"
-    printf "# TYPE mc_forkpoint_dir_count gauge\n"
-    printf "mc_forkpoint_dir_count %s\n" "$forkpoint_dir_count"
-
-    printf "# HELP mc_ledger_dir_count provides file count of Monad ledger directory\n"
-    printf "# TYPE mc_ledger_dir_count gauge\n"
-    printf "mc_ledger_dir_count %s\n" "$ledger_dir_count"
-
-    printf "# HELP mc_wal_dir_count provides file count of Monad wal files\n"
-    printf "# TYPE mc_wal_dir_count gauge\n"
-    printf "mc_wal_dir_count %s\n" "$wal_dir_count"
-
-    # Write block proposals
-    if [ ${#block_proposals[@]} -gt 0 ]; then
-        printf "# HELP mc_block_proposal Indicates a block was proposed (1) or skipped (0) by this validator, with additional sequence and transaction details\n"
-        printf "# TYPE mc_block_proposal gauge\n"
-        for proposal in "${block_proposals[@]}"; do
-            printf "%s\n" "$proposal"
-        done
-    fi
-} > "$output_file" 2>/dev/null || { echo "Cannot write to monad-metrics-data.prom"; exit 1; }
+mv -f "$tmp_file" "$OUTPUT_FILE" || { echo "Cannot write $OUTPUT_FILE" >&2; exit 1; }
+trap - EXIT
+chmod 0644 "$OUTPUT_FILE"
